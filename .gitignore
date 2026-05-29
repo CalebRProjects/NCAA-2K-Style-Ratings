@@ -1,49 +1,65 @@
-# History files
+# R / RStudio
 .Rhistory
-.Rapp.history
-
-# Session Data files
 .RData
-.RDataTmp
-
-# User-specific files
 .Ruserdata
-
-# Example code in package build process
-*-Ex.R
-
-# Output files from R CMD build
-/*.tar.gz
-
-# Output files from R CMD check
-/*.Rcheck/
-
-# RStudio files
 .Rproj.user/
+*.Rproj
 
-# produced vignettes
-vignettes/*.html
-vignettes/*.pdf
-
-# OAuth2 token, see https://github.com/hadley/httr/releases/tag/v0.3
-.httr-oauth
-
-# knitr and R markdown default cache directories
+# Rendered / generated report files
+*.html
+*.log
+*.tex
+*.aux
+*.out
+*.toc
+*.synctex.gz
+*_files/
 *_cache/
-/cache/
+knitr-cache/
+cache/
 
-# Temporary files created by R markdown
+# Quarto / R Markdown intermediates
+/.quarto/
 *.utf8.md
 *.knit.md
 
-# R Environment Variables
+# OS / editor junk
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Private / restricted raw data
+data/raw/
+data/private/
+private/
+secrets/
+*.key
+*.pem
 .Renviron
 
-# pkgdown site
-docs/
+# HDI private source files
+HDI Ratings*.csv
+*HDI*.csv
 
-# translation temp files
-po/*~
+# Duplicate/download artifacts
+*(1).csv
+*(2).csv
+*(1).R
+*(2).R
+*(1).txt
+*(2).txt
+*(1).Rmd
+*(2).Rmd
 
-# RStudio Connect folder
-rsconnect/
+# Large or temporary data outputs
+*.rds
+*.RDS
+*.zip
+*.tar.gz
+
+# Local scratch files
+scratch/
+tmp/
+temp/
+archive/tmp/
