@@ -1,0 +1,543 @@
+---
+title: "WBB 2k Rating"
+author: "Caleb Ramsey"
+date: "2025-10-1"
+output: pdf_document
+---
+
+```{r loading libraries}
+library(dplyr); library(tidyr); library(purrr); library(stringr)
+library(readr); library(tibble); library(fs); library(wehoop)
+library(lubridate); library(here); library(rlang)
+```
+
+```{r D1 labels}
+D1_CONF = c(
+  "ACC","AAC","AEC","ASUN","A10","B12",
+  "Big East","Big Sky","Big South","Big Ten","Big West",
+  "CAA","CUSA","Horizon","Ivy League","MAAC","MAC","MEAC",
+  "MVC","Mountain West","NEC","OVC","Pac 12","Patriot","SEC","SoCon",
+  "Southland","Summit League","Sun Belt","SWAC","WAC","WCC")
+```
+
+```{r sample-size threshold}
+MIN_MINUTES = 200
+MIN_GAMES = 10
+
+season = 2025
+players_path = here("data/wcbb_players_2025_D1.csv")
+out_dir = here("data/processed"); dir_create(out_dir)
+```
+
+```{r helper functions}
+mode_non_na = function(x)
+  {
+  x = x[!is.na(x) & x != ""]; if(!length(x))(return(NA_character_)) 
+  names(sort(table(x), T))[1]
+  }
+
+find_col = function(df, include_patterns, exclude_patterns = NULL)
+  {
+  nms = tolower(names(df))
+  hit = Reduce(`|`, lapply(include_patterns, \(p) grepl(p, nms)))
+  if(!is.null(exclude_patterns) && length(exclude_patterns))(hit = hit & !Reduce(`|`, lapply(exclude_patterns, \(p) grepl(p, nms))))
+  idx = which(hit); if(length(idx))(names(df)[idx[1]])else(NULL)
+  }
+col_or_na = function(df, col_name) if(is.null(col_name)){rep(NA_character_, nrow(df))} else{df[[col_name]]}
+pick_num = function(df, candidates, default = 0)
+  {
+  nm = intersect(candidates, names(df))
+  if(length(nm)) suppressWarnings(as.numeric(df[[nm[1]]]))else{rep(default, nrow(df))}
+  }
+
+pick_chr = function(df, candidates, default = NA_character_)
+  {
+  nm = intersect(candidates, names(df))
+  if(length(nm)) as.character(df[[nm[1]]])else{rep(default, nrow(df))}
+  }
+
+to_min = function(x)
+  {
+  if (is.numeric(x))return(as.numeric(x)); ifelse(is.na(x) | x == "", NA_real_,
+  as.numeric(sub(":.*","",x)) + as.numeric(sub(".*:","",x))/60) 
+  }
+```
+
+```{r build 2025 szn totals from box-scores}
+players_g = wehoop::load_wbb_player_box(seasons = season); stopifnot(nrow(players_g) > 0)
+
+players_wehoop =
+  players_g %>%
+  transmute(
+    athlete_id = pick_chr(., c("athlete_id","player_id","athleteId","playerId")),
+    player_name = pick_chr(.,
+                c("display_name","athlete_display_name","player","player_name","name")),
+    team_id = pick_chr(., c("team_id","teamId")),
+    team_name = pick_chr(., c("team_display_name","team_short_display_name","team_name")),
+    minutes = to_min(pick_chr(., c("minutes","mins","time_played"))),
+    points = pick_num(., c("points","pts")),
+    rebounds = pick_num(., c("rebounds","reb_total")),
+    defensive_rebounds = pick_num(., c("defensive_rebounds","defensiveRebounds","dreb")),
+    offensive_rebounds = pick_num(., c("offensive_rebounds","offensiveRebounds","oreb")),
+    assists = pick_num(., c("assists","ast")),
+    steals = pick_num(., c("steals","stl")),
+    blocks = pick_num(., c("blocks","blk")),
+    turnovers = pick_num(., c("turnovers","tov")),
+    personal_fouls = pick_num(., c("personal_fouls","pf")),
+    field_goals_made = pick_num(., c("field_goals_made","fgm")),
+    field_goals_attempted = pick_num(., c("field_goals_attempted","fga")),
+    three_point_made = pick_num(.,
+              c("three_point_field_goals_made","three_points_made","three_pm","tpm")),
+    three_point_attempted = pick_num(.,
+              c("three_point_field_goals_attempted","three_points_attempted","three_pa","tpa")),
+    free_throws_made = pick_num(., c("free_throws_made","ftm")),
+    free_throws_attempted = pick_num(., c("free_throws_attempted","fta"))
+    ) %>% group_by(athlete_id, player_name, team_id, team_name) %>%
+  summarise(
+    across(c(minutes, points, rebounds, defensive_rebounds, offensive_rebounds,
+             assists, steals, blocks, turnovers, personal_fouls,
+             field_goals_made, field_goals_attempted,
+             three_point_made, three_point_attempted,
+             free_throws_made, free_throws_attempted), \(x) sum(x, na.rm = T)),
+    games_played = dplyr::n(), .groups = "drop") %>%
+  mutate(
+    field_goal_percent = if_else(field_goals_attempted > 0,
+                                 field_goals_made/field_goals_attempted, NA_real_),
+    three_point_percent = if_else(three_point_attempted > 0,
+                                  three_point_made/three_point_attempted, NA_real_),
+    free_throw_percent = if_else(free_throws_attempted > 0,
+                                 free_throws_made/free_throws_attempted, NA_real_)
+    ) %>% filter(minutes > 0)
+
+write_csv(players_wehoop, players_path)
+```
+
+```{r map teams to conferences}
+players = readr::read_csv(players_path, show_col_types = F)
+athlete_col = intersect(c("athleteID","athlete_id","player_id"), names(players))[1]
+team_col = intersect(c("team_ID","team_id","teamId"), names(players))[1]
+player_name_col = intersect(c("player","player_name","name","display_name"), names(players))[1]
+if(is.na(player_name_col)){player_name_col = NULL}
+
+players_joined =
+  players %>%
+  mutate(!!rlang::sym(athlete_col) := as.character(.data[[athlete_col]]),
+         !!rlang::sym(team_col) := as.character(.data[[team_col]])) %>%
+  {if(!"position" %in% names(.)) mutate(., position = NA_character_) else .}
+
+sched = wehoop::load_wbb_schedule(seasons = season, season_types = "Regular Season")
+
+pick_exact = function(df, candidates)
+  {
+  ln = tolower(names(df)); for(c in tolower(candidates))
+    {
+    i = match(c, ln, nomatch = 0); if(i > 0) return(names(df)[i])
+    }; NULL}
+
+gid_col = pick_exact(sched, c("game_id","id"))
+h_col = pick_exact(sched, c("home_team_id","home_id"))
+a_col = pick_exact(sched, c("away_team_id","away_id"))
+
+h_team_col = find_col(sched, c("^home.*team.*id$","^home.*id$","^home_team_id$"))
+a_team_col = find_col(sched, c("^away.*team.*id$","^away.*id$","^away_team_id$"))
+h_conf_id = find_col(sched, c("^home.*conference.*id$","^home.*group.*id$"))
+h_conf_name = find_col(sched,
+                       c("^home.*conference.*name$",
+                         "^home.*group.*display.*name$",
+                         "^home.*group.*name$"))
+a_conf_id = find_col(sched, c("^away.*conference.*id$","^away.*group.*id$"))
+a_conf_name = find_col(sched,
+                       c("^away.*conference.*name$",
+                         "^away.*group.*display.*name$",
+                         "^away.*group.*name$"))
+h_team_name = find_col(sched,
+                       c("^home.*team.*display.*name$",
+                         "^home.*team.*name$",
+                         "^home.*short.*name$"))
+a_team_name = find_col(sched,
+                       c("^away.*team.*display.*name$",
+                         "^away.*team.*name$",
+                         "^away.*short.*name$"))
+
+home_obs = tibble::tibble(
+  team_id = as.character(col_or_na(sched, h_team_col)),
+  team_name_meta = as.character(col_or_na(sched, h_team_name)),
+  conference_id = as.character(col_or_na(sched, h_conf_id)),
+  conference_name = as.character(col_or_na(sched, h_conf_name))
+  )
+
+away_obs = tibble::tibble(
+  team_id = as.character(col_or_na(sched, a_team_col)),
+  team_name_meta = as.character(col_or_na(sched, a_team_name)),
+  conference_id = as.character(col_or_na(sched, a_conf_id)),
+  conference_name = as.character(col_or_na(sched, a_conf_name))
+  )
+
+teams_meta =
+  dplyr::bind_rows(home_obs, away_obs) %>%
+  dplyr::mutate(dplyr::across(dplyr::everything(), ~na_if(.x, ""))) %>%
+  dplyr::filter(!is.na(team_id)) %>%
+  dplyr::group_by(team_id) %>%
+  dplyr::summarise(
+    team_name_meta = mode_non_na(team_name_meta),
+    conference_id = mode_non_na(conference_id),
+    conference_name = mode_non_na(conference_name),
+    .groups = "drop"
+    )
+
+team_id_to_name = teams_meta %>% 
+  dplyr::select(team_id, team_name = team_name_meta) %>% 
+  dplyr::distinct()
+
+team_conf_auto =
+  players %>% dplyr::transmute(team_id = as.character(.data[[team_col]])) %>% 
+  dplyr::distinct() %>%
+  dplyr::left_join(teams_meta, by = "team_id") %>%
+  dplyr::left_join(team_id_to_name, by = "team_id") %>%
+  dplyr::mutate(team_name = dplyr::coalesce(team_name, team_name_meta)) %>%
+  dplyr::select(team_id, team_name, conference_name, conference_id)
+
+map_file = "C:/Users/caleb/Downloads/conf_name_map.txt"
+
+if (file.exists(map_file))
+  {
+  map_lines = readLines(map_file)
+  map_df = tibble::tibble(raw = map_lines) %>%
+    dplyr::mutate(
+      team_id = stringr::str_match(raw, '^"([0-9]+)"')[,2],
+      conf = stringr::str_match(raw, '"\\s*=\\s*"(.*?)"')[,2]
+      ) %>%
+    dplyr::filter(!is.na(team_id), !is.na(conf), conf != "")
+  team_conf_override = tibble::tibble(team_id = map_df$team_id, conference_name = map_df$conf,
+                                      conference_id = map_df$conf)
+  team_conf_auto = team_conf_auto %>%
+    dplyr::left_join(team_conf_override, by = "team_id", suffix = c("_auto","_hard")) %>%
+    dplyr::mutate(conference_name = dplyr::coalesce(conference_name_hard, conference_name_auto),
+                  conference_id   = dplyr::coalesce(conference_id_hard, conference_id_auto)) %>%
+    dplyr::select(team_id, team_name, conference_name, conference_id)
+  }
+
+team_conf_map_final = team_conf_auto %>% 
+  dplyr::rename(team_name_map = team_name) %>%
+  dplyr::select(team_id, team_name_map, conference_name, conference_id)
+
+players_enriched =
+  players_joined %>%
+  dplyr::left_join(team_conf_map_final, by = setNames("team_id", team_col)) %>%
+  dplyr::mutate(team_name = dplyr::coalesce(.data[["team_name"]], .data[["team_name_map"]])) %>%
+  dplyr::transmute(
+    athlete_id = as.character(.data[[athlete_col]]),
+    player_name = if(!is.null(player_name_col))(.data[[player_name_col]])else(NA_character_),
+    position,
+    team_id = .data[[team_col]],
+    team_name,
+    conference_name,
+    blocks = dplyr::coalesce(.data[["blocks"]], 0),
+    defensive_rebounds = dplyr::coalesce(.data[["defensive_rebounds"]], 0),
+    steals = dplyr::coalesce(.data[["steals"]], 0),
+    rebounds = dplyr::coalesce(.data[["rebounds"]], 0),
+    minutes = dplyr::coalesce(.data[["minutes"]], 0),
+    games_played = dplyr::coalesce(.data[["games_played"]], 0),
+    assists = dplyr::coalesce(.data[["assists"]], 0),
+    field_goals_attempted = dplyr::coalesce(.data[["field_goals_attempted"]], 0),
+    field_goals_made = dplyr::coalesce(.data[["field_goals_made"]], 0),
+    field_goal_percent = dplyr::coalesce(.data[["field_goal_percent"]], NA_real_),
+    three_point_made = dplyr::coalesce(.data[["three_point_made"]], 0),
+    three_point_attempted = dplyr::coalesce(.data[["three_point_attempted"]], 0),
+    three_point_percent = dplyr::coalesce(.data[["three_point_percent"]],
+                          dplyr::if_else(dplyr::coalesce(.data[["three_point_attempted"]],0) > 0,
+                          .data[["three_point_made"]]/.data[["three_point_attempted"]],
+                          NA_real_)),
+    free_throw_percent = dplyr::coalesce(.data[["free_throw_percent"]], NA_real_),
+    free_throws_attempted = dplyr::coalesce(.data[["free_throws_attempted"]], 0),
+    free_throws_made = dplyr::coalesce(.data[["free_throws_made"]], 0),
+    offensive_rebounds = dplyr::coalesce(.data[["offensive_rebounds"]], 0),
+    points = dplyr::coalesce(.data[["points"]], 0),
+    turnovers = dplyr::coalesce(.data[["turnovers"]], 0),
+    personal_fouls = dplyr::coalesce(.data[["personal_fouls"]], 0)
+    ) %>%
+  dplyr::arrange(dplyr::desc(minutes), dplyr::desc(games_played)) %>%
+  dplyr::filter(conference_name %in% D1_CONF)
+
+readr::write_csv(players_enriched, 
+                 "C:/Users/caleb/Downloads/wcbb_players_2025_with_team_conf_pos.csv")
+```
+
+```{r per-game stats & advanced metrics}
+players_enriched_avg = players_enriched %>%
+  dplyr::mutate(
+    gp = pmax(games_played, 0),
+    mpg = if_else(gp > 0, minutes/gp, NA_real_),
+    ppg = if_else(gp > 0, points/gp, NA_real_),
+    rpg = if_else(gp > 0, rebounds/gp, NA_real_),
+    apg = if_else(gp > 0, assists/gp, NA_real_),
+    spg = if_else(gp > 0, steals/gp, NA_real_),
+    bpg = if_else(gp > 0, blocks/gp, NA_real_),
+    orpg = if_else(gp > 0, offensive_rebounds/gp, NA_real_),
+    TS = { den = (field_goals_attempted + 0.44 * free_throws_attempted)
+    if_else(den > 0, points/(2 * den), NA_real_) },
+    eFG = if_else(field_goals_attempted > 0,
+                  (field_goals_made + 0.5*three_point_made)/field_goals_attempted, NA_real_),
+    ThreePAr = if_else(field_goals_attempted > 0, three_point_attempted/field_goals_attempted,
+                       NA_real_),
+    tov_good = 1 - (turnovers/pmax(1, field_goals_attempted + 
+                                     0.44*free_throws_attempted + turnovers))
+    ) %>%
+  dplyr::filter(minutes >= MIN_MINUTES, gp >= MIN_GAMES) %>%
+  dplyr::select(athlete_id, player_name, position, team_id, team_name, conference_name,
+                games_played = gp, minutes, mpg, ppg, rpg, apg, spg, bpg, orpg,
+                TS, eFG, ThreePAr, tov_good)
+
+players_enriched_avg = players_enriched_avg %>%
+  dplyr::mutate(
+    ast40 = if_else(minutes>0, apg*40/mpg, NA_real_),
+    blk40 = if_else(minutes>0, bpg*40/mpg, NA_real_),
+    orb40 = if_else(minutes>0, orpg*40/mpg, NA_real_)
+    )
+
+rank_desc = function(x){rank(-x, ties.method="average", na.last="keep")}
+team_key = players_enriched_avg$team_id
+team_n = ave(rep(1, nrow(players_enriched_avg)), team_key, FUN = length)
+ast_rk = ave(players_enriched_avg$ast40, team_key, FUN = rank_desc)
+blk_rk = ave(players_enriched_avg$blk40, team_key, FUN = rank_desc)
+orb_rk = ave(players_enriched_avg$orb40, team_key, FUN = rank_desc)
+cut_top = pmax(2, round(team_n * 0.30))
+
+players_enriched_avg = players_enriched_avg %>%
+  dplyr::mutate(
+    guard_flag = (ast_rk <= cut_top) | (ThreePAr >= 0.33 & bpg < 0.7),
+    center_flag = ((blk_rk <= cut_top) | (orb_rk <= cut_top)) & ThreePAr <= 0.18,
+    pos_bucket = case_when(
+      guard_flag & !center_flag ~ "Guard",
+      center_flag & !guard_flag  ~ "Center",
+      guard_flag & center_flag ~ if_else(ThreePAr >= 0.22, "Guard", "Center"),
+      T ~ "Forward"
+      )
+    ) %>% dplyr::select(-guard_flag,-center_flag,-ast40,-blk40,-orb40)
+```
+
+```{r team strength & strength-of-schedule}
+home_score_col = pick_exact(sched, c("home_team_score","home_score","home_points"))
+away_score_col = pick_exact(sched, c("away_team_score","away_score","away_points"))
+
+scores = sched %>%
+  dplyr::transmute(game_id = as.character(.data[[gid_col]]),
+                   home = as.character(.data[[h_col]]),
+                   away = as.character(.data[[a_col]]),
+                   hs = as.numeric(.data[[home_score_col]]),
+                   as = as.numeric(.data[[away_score_col]])) %>%
+  dplyr::filter(is.finite(hs), is.finite(as))
+
+compute_team_strengths_simple = function(scores, lam=1e-2)
+  {
+  wide = scores %>% dplyr::transmute(home, away, margin = hs - as)
+  teams = sort(unique(c(wide$home, wide$away)))
+  Tn = length(teams); idx = setNames(seq_len(Tn), teams)
+  A = matrix(0, nrow = nrow(wide), ncol = Tn + 1)
+  A[cbind(seq_len(nrow(wide)), idx[wide$home])] = 1
+  A[cbind(seq_len(nrow(wide)), idx[wide$away])] = -1
+  A[, Tn+1] = 1
+  y = wide$margin
+  coef = solve(t(A)%*%A + diag(lam, Tn+1), t(A)%*%y)
+  s = as.numeric(coef[1:Tn]) - mean(as.numeric(coef[1:Tn]))
+  names(s) = teams; setNames(as.numeric(scale(s)), names(s))
+  }
+
+team_z_map = compute_team_strengths_simple(scores, lam=1e-2)
+team_sos = dplyr::bind_rows(
+  scores %>% dplyr::transmute(team_id = home, opp_id = away, wt = 0.9),
+  scores %>% dplyr::transmute(team_id = away, opp_id = home, wt = 1.1)
+  ) %>%
+  dplyr::mutate(opp_z = unname(tidyr::replace_na(team_z_map[opp_id], 0))) %>%
+  dplyr::group_by(team_id) %>%
+  dplyr::summarise(sos_raw = mean(opp_z * wt, na.rm=TRUE), .groups="drop") %>%
+  dplyr::mutate(sos_z = as.numeric(scale(sos_raw)))
+
+conf_df = players_enriched_avg %>%
+  dplyr::distinct(team_id, conference_name) %>%
+  dplyr::mutate(team_z_val = unname(tidyr::replace_na(team_z_map[team_id], 0))) %>%
+  dplyr::group_by(conference_name) %>%
+  dplyr::summarise(conf_mean = mean(team_z_val), .groups = "drop") %>%
+  dplyr::mutate(conf_z = as.numeric(scale(conf_mean)))
+
+players_enriched_avg = players_enriched_avg %>%
+  dplyr::left_join(conf_df, by = "conference_name") %>%
+  dplyr::mutate(conf_z = tidyr::replace_na(conf_z, 0),
+                conf_tier_pow5 = conference_name %in% c("ACC","SEC","Big Ten",
+                                                        "B12","Big East","Pac 12"))
+
+players_enriched_avg = players_enriched_avg %>%
+  dplyr::mutate(team_z = unname(tidyr::replace_na(team_z_map[team_id], 0))) %>%
+  dplyr::left_join(team_sos, by="team_id") %>%
+  dplyr::mutate(sos_z = tidyr::replace_na(sos_z, 0))
+```
+
+```{r role-aware rating and 40-100 scale}
+winsor = function(x,p=0.02)
+  {
+  if(!is.numeric(x)) return(x)
+  lo = stats::quantile(x, p, na.rm = T)
+  hi = stats::quantile(x, 1-p, na.rm = T)
+  pmin(pmax(x, lo), hi)
+  }
+to_pct = function(x)
+  {
+  x = as.numeric(x); ok = is.finite(x)
+  if (!any(ok)) return(rep(0.5, length(x)))
+  r = rank(x[ok], ties.method="average")
+  out = rep(0.5, length(x))
+  out[ok] = (r-1)/(sum(ok)-1 + 1e-9)
+  out
+  }
+
+fix_z = function(v)
+  {
+  v = as.numeric(v)
+  v[!is.finite(v)] = NA_real_
+  if (all(is.na(v))) return(rep(0, length(v)))
+  m = mean(v, na.rm=T); s = stats::sd(v, na.rm = T)
+  if (!is.finite(s) || s==0) return(rep(0, length(v)))
+  (v-m)/s
+  }
+
+rates = players_enriched_avg %>%
+  dplyr::transmute(
+    pts40 = ifelse(mpg>0, ppg*40/mpg, NA_real_),
+    ast40 = ifelse(mpg>0, apg*40/mpg, NA_real_),
+    reb40 = ifelse(mpg>0, rpg*40/mpg, NA_real_),
+    stl40 = ifelse(mpg>0, spg*40/mpg, NA_real_),
+    blk40 = ifelse(mpg>0, bpg*40/mpg, NA_real_)
+    ) %>% dplyr::mutate(dplyr::across(dplyr::everything(), winsor))
+
+P = dplyr::tibble(
+  p_pts40 = to_pct(rates$pts40),
+  p_ast40 = to_pct(rates$ast40),
+  p_reb40 = to_pct(rates$reb40),
+  p_stl40 = to_pct(rates$stl40),
+  p_blk40 = to_pct(rates$blk40),
+  p_ts = to_pct(winsor(players_enriched_avg$TS)),
+  p_efg = to_pct(winsor(players_enriched_avg$eFG)),
+  p_tpar = to_pct(winsor(players_enriched_avg$ThreePAr)),
+  p_tovbad= to_pct(winsor(1 - players_enriched_avg$tov_good))
+  )
+
+shoot_grav = to_pct(0.5*P$p_tpar + 0.5*P$p_efg)
+
+s_guard =
+  0.18*P$p_pts40 + 0.10*P$p_ast40 + 0.13*P$p_ts +
+  0.03*shoot_grav + 0.05*P$p_stl40 + 0.04*P$p_blk40 + 0.08*P$p_reb40 -
+  0.25*P$p_tovbad
+
+s_wing =
+  0.28*P$p_pts40 + 0.09*P$p_ast40 + 0.20*P$p_ts +
+  0.08*shoot_grav + 0.22*P$p_reb40 + 0.07*P$p_stl40 +
+  0.08*P$p_blk40 - 0.12*P$p_tovbad
+
+s_center =
+  0.30*P$p_pts40 + 0.03*P$p_ast40 + 0.22*P$p_ts +
+  0.28*P$p_reb40 + 0.18*P$p_blk40 + 0.05*P$p_stl40 -
+  0.06*P$p_tovbad
+
+role = players_enriched_avg$pos_bucket
+score_role = ifelse(role=="Guard", s_guard,
+                    ifelse(role=="Center", s_center, s_wing))
+
+clampp = function(x,a,b){pmin(pmax(x,a),b)}
+mpg = players_enriched_avg$mpg
+
+per40_shrink = (pmax(mpg, 1) / 24)^0.35
+score_role_shrunk = score_role * per40_shrink
+
+rel_base = 0.70 + 0.30*clampp((mpg - 14)/(34 - 14), 0, 1)
+rel_bonus = 0.04*clampp((mpg - 28)/(36 - 28), 0, 1)
+rel_mpg = rel_base + rel_bonus
+
+bench_tax = 0.16 * pmax(0, (14 - mpg)/14) +
+  0.26 * pmax(0, (10 - mpg)/10) +
+  0.08 * pmax(0, (8 - mpg)/8 )^1.2
+
+extra_pen = 0.28 * pmax(0, (12 - mpg)/12)^1.15
+
+min_rk = ave(mpg, players_enriched_avg$team_id, FUN=function(x){rank(-x, ties.method="average")})
+rotation_bonus = ifelse(min_rk <= 6, 0.06,
+                        ifelse(min_rk <= 8, 0.03, 0.00))
+
+deep_bench_pen = ifelse(mpg < 12, 0.1 * (1 - mpg/12)^1, 0)
+
+z_stats_raw = as.numeric(scale(score_role_shrunk)) * rel_mpg - bench_tax - extra_pen + rotation_bonus - deep_bench_pen
+pos_mean = ave(z_stats_raw, role, FUN=function(x){mean(x, na.rm=T)})
+pos_sd = ave(z_stats_raw, role, FUN=function(x){stats::sd(x, na.rm=T)})
+z_stats = (z_stats_raw - pos_mean) / pmax(pos_sd, 1e-6)
+
+if(!"opp_z_w" %in% names(players_enriched_avg))(players_enriched_avg$opp_z_w = 0)
+
+players_enriched_avg$opp_z_w = as.numeric(players_enriched_avg$opp_z_w)
+players_enriched_avg$opp_z_w[!is.finite(players_enriched_avg$opp_z_w)] = 0
+players_enriched_avg$sos_z = as.numeric(players_enriched_avg$sos_z)
+players_enriched_avg$sos_z[!is.finite(players_enriched_avg$sos_z)] = 0
+players_enriched_avg$conf_z = as.numeric(players_enriched_avg$conf_z)
+players_enriched_avg$conf_z[!is.finite(players_enriched_avg$conf_z)] = 0
+
+sos_neg = pmax(0, -players_enriched_avg$sos_z)
+opp_neg = pmax(0, -players_enriched_avg$opp_z_w)
+conf_neg = pmax(0, -players_enriched_avg$conf_z)
+conf_pos = pmax(0, players_enriched_avg$conf_z)
+
+z_stats = z_stats - 0.45*sos_neg - 0.18*opp_neg - 0.25*conf_neg + 0.04*conf_pos +
+          0.03*as.numeric(players_enriched_avg$conf_tier_pow5)
+
+fix_z = function(v)
+  {
+  v = as.numeric(v); v[!is.finite(v)] = NA_real_
+  if(all(is.na(v)))return(rep(0, length(v)))
+  m = mean(v, na.rm=T)
+  sd = stats::sd(v, na.rm=T)
+  if(!is.finite(sd) || sd==0)return(rep(0, length(v)))
+  (v-m)/sd
+  }
+
+z_stats = fix_z(z_stats)
+z_sos = fix_z(players_enriched_avg$sos_z)
+z_opp = fix_z(players_enriched_avg$opp_z_w)
+z_conf = fix_z(players_enriched_avg$conf_z)
+
+W_STATS = 0.70
+W_SOS_TEAM = 0.14
+W_SOS_PLAYER = 0.06
+W_CONF = 0.10
+
+combo = W_STATS*z_stats + W_SOS_TEAM*z_sos + W_SOS_PLAYER*z_opp + W_CONF*z_conf
+combo[!is.finite(combo)] = 0
+
+combo_z = (combo - mean(combo))/stats::sd(combo)
+combo_rescaled = combo_z * 0.80 - 0.55
+
+conf_mult = ifelse(players_enriched_avg$conf_tier_pow5, 1, 0.88)
+role_mult = ifelse(players_enriched_avg$pos_bucket == "Guard", 0.96, 1)
+combo_rescaled = combo_rescaled * conf_mult * role_mult
+
+p5 = players_enriched_avg$conference_name %in% c("ACC","SEC","Big Ten","B12","Big East","Pac 12")
+
+q = to_pct(combo_rescaled)
+q2 = q^2.15
+
+kn_q = c(0.00, 0.20, 0.50, 0.80, 0.90, 0.95, 0.975, 0.99, 1.00)
+kn_r = c(40, 68, 76, 82, 86, 89, 91.5, 93.5, 98)
+
+rating = approx(x = kn_q, y = kn_r, xout = q2, method = "linear", rule = 2)$y
+rating = rating - ifelse(!p5 & rating > 92, 1.2 + 0.5*(rating - 92), 0)
+rating = pmin(pmax(rating, 40), 100)
+
+rating_raw = rating
+rating = as.integer(floor(rating_raw + 0.5))
+
+final_ratings = players_enriched_avg %>%
+  dplyr::transmute(
+    player = dplyr::coalesce(player_name, athlete_id),
+    team = team_name, conf = conference_name, pos = pos_bucket,
+    g = games_played, mpg, ppg, rpg, apg, spg, bpg,
+    ts = TS, efg = eFG, tpar = ThreePAr,
+    team_z, sos_z, opp_z_w,
+    rating_raw, rating
+    ) %>% dplyr::arrange(dplyr::desc(rating), dplyr::desc(rating_raw))
+```
